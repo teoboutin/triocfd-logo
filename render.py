@@ -58,6 +58,11 @@ BG_DOTS = 900
 BG_SEED = 7
 BG_ALPHA = 0.85         # brightest dot; each dot gets a random fraction
 BG_RGB = (0.62, 0.72, 0.85)
+BG_DRIFT = 0.5          # m/s, upward in forward time: in the reversed
+#                         playback the snow streams downward past the swarm,
+#                         so the whole shot reads as ascending — the common
+#                         carriage the buoyant mode's still liquid (and the
+#                         centroid-pinned camera) otherwise hide. 0 = static.
 
 # ------------------------------------------------------------- trail knobs
 # Each bubble drags a fading streak along its own trajectory (the tracked
@@ -252,19 +257,31 @@ class Tracker:
         return out, tri_color, pieces
 
 
-def make_dust(global_bounds):
-    """The world-fixed particle field, split into behind/in-front batches."""
+def make_dust(global_bounds, t_end=0.0):
+    """The particle field, split into behind/in-front batches. The z extent
+    is widened by the drift span so the field covers every frame of the
+    drifting playback at the same density."""
     rng = np.random.default_rng(BG_SEED)
     (x0, x1), _, (z0, z1) = global_bounds
-    pts = np.column_stack([rng.uniform(x0 - 0.4, x1 + 0.4, BG_DOTS),
-                           rng.uniform(-0.7, 1.4, BG_DOTS),
-                           rng.uniform(z0 - 0.4, z1 + 0.4, BG_DOTS)])
-    size = rng.uniform(1.5, 11.0, BG_DOTS)
-    alpha = BG_ALPHA * rng.uniform(0.25, 1.0, BG_DOTS) \
+    span = BG_DRIFT * t_end
+    zlo = z0 - 0.4 - max(0.0, span)
+    zhi = z1 + 0.4 + max(0.0, -span)
+    n = int(BG_DOTS * (zhi - zlo) / (z1 - z0 + 0.8))
+    pts = np.column_stack([rng.uniform(x0 - 0.4, x1 + 0.4, n),
+                           rng.uniform(-0.7, 1.4, n),
+                           rng.uniform(zlo, zhi, n)])
+    size = rng.uniform(1.5, 11.0, n)
+    alpha = BG_ALPHA * rng.uniform(0.25, 1.0, n) \
         * (0.4 + 0.6 * (1.4 - pts[:, 1]) / 2.1)     # nearer = brighter
     front = pts[:, 1] < 0.0        # clearly before the bubble slab
     batch = lambda sel: (pts[sel], size[sel], alpha[sel])
     return batch(~front), batch(front)
+
+
+def drift_dust(dust, t):
+    """The field as seen at forward time t: shifted by the drift."""
+    dz = np.array([0.0, 0.0, BG_DRIFT * t])
+    return tuple((pts + dz, size, alpha) for pts, size, alpha in dust)
 
 
 def draw_dust(ax, batch):
@@ -382,7 +399,7 @@ def main():
                         for c, h in zip(centres_c, half)]
     frames = []
     t_end = shown[-1][0]
-    dust = make_dust(bounds) if BG_DOTS > 0 else None
+    dust = make_dust(bounds, t_end=t_end) if BG_DOTS > 0 else None
     (bx0, bx1), _, (bz0, bz1) = bounds
     for idx, (t, nodes, tris, compo, pieces, mi) in enumerate(shown):
         fade = min(1.0, t / TRAIL_FADE_T) if TRAIL_FADE_T > 0 else 1.0
@@ -415,7 +432,8 @@ def main():
         render_frame(nodes, tris, compo, colors, out,
                      frame_bounds[idx] if CAM_FOLLOW else bounds,
                      azim=azim, trails=trails, streams=streams,
-                     stream_fade=fade, dust=dust)
+                     stream_fade=fade,
+                     dust=drift_dust(dust, t) if dust else None)
         frames.append(out)
         print(f'{out}  t={t:.3f}  azim={azim:.1f}  tris={len(tris)}')
     if len(frames) < 2:
