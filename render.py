@@ -5,6 +5,7 @@ reverse (bubbles -> logo), with a hold on the final logo frame.
 
 Usage: python3 render.py [case_name] [t_max] (default: logo, all dumps)
 """
+import math
 import os
 import sys
 import numpy as np
@@ -50,19 +51,34 @@ CAM_SMOOTH = 15         # smoothing window (frames) of the camera path
 CAM_MARGIN = 0.22       # relative margin around the cloud bounding box
 
 # -------------------------------------------------------- background knobs
-# A world-fixed field of faint suspended particles ("marine snow"): the only
-# static reference in the shot, it is what makes the camera glide and zoom
-# visible. Dots clearly in front of the bubble slab draw over the surfaces,
-# the rest behind them. BG_DOTS = 0 disables.
-BG_DOTS = 900
+# The background is the frame of the water the swarm is carried in. It
+# drifts at BG_DRIFT (m/s, upward in forward time): in the reversed playback
+# it streams downward past the swarm, so the whole shot reads as ascending —
+# the common carriage the buoyant mode's still liquid (and the
+# centroid-pinned camera) otherwise hide. Two thematic layers:
+#  - the IJK grid: a faint structured-mesh plane behind everything (this is
+#    a mesh code; the bubbles rise through their own grid). Horizontal
+#    k-lines dominate — discrete floors sweeping past.
+#  - micro-bubbles: parallax layers of small out-of-focus bubbles rising
+#    with the flow, each layer at its own apparent speed (larger background
+#    bubbles rise faster relative to the water, so they stream down slower
+#    in playback), with a slight lateral wobble.
 BG_SEED = 7
-BG_ALPHA = 0.85         # brightest dot; each dot gets a random fraction
 BG_RGB = (0.62, 0.72, 0.85)
-BG_DRIFT = 0.5          # m/s, upward in forward time: in the reversed
-#                         playback the snow streams downward past the swarm,
-#                         so the whole shot reads as ascending — the common
-#                         carriage the buoyant mode's still liquid (and the
-#                         centroid-pinned camera) otherwise hide. 0 = static.
+BG_DRIFT = 0.5          # water-frame speed; 0 = static background
+GRID_STRIDE = 8         # mesh cells between grid lines (0 disables the grid)
+GRID_DX = 0.02          # the mesh spacing the grid depicts
+GRID_ALPHA = 0.22
+GRID_Y = 1.35           # depth of the grid plane (behind everything)
+GRID_LABELS = True      # a few faint k-indices on the horizontal lines
+# per layer: (count, y0, y1, size_min, size_max, alpha, speed_fraction of
+# BG_DRIFT, wobble amplitude in m). Layers with y < 0 draw over the
+# surfaces (they are in front of the bubble slab).
+BUBBLE_LAYERS = (
+    (260, 1.00, 1.30, 2.0, 8.0, 0.55, 0.90, 0.015),
+    (170, 0.55, 0.95, 4.0, 14.0, 0.65, 0.76, 0.025),
+    (45, -0.50, -0.05, 8.0, 26.0, 0.75, 0.60, 0.035),
+)
 
 # ------------------------------------------------------------- trail knobs
 # Each bubble drags a fading streak along its own trajectory (the tracked
@@ -257,47 +273,91 @@ class Tracker:
         return out, tri_color, pieces
 
 
-def make_dust(global_bounds, t_end=0.0):
-    """The particle field, split into behind/in-front batches. The z extent
-    is widened by the drift span so the field covers every frame of the
-    drifting playback at the same density."""
+def make_background(global_bounds, t_end=0.0):
+    """The drifting water frame: grid-plane data and micro-bubble layers.
+    Every z extent is widened by that element's drift span so the field
+    covers each frame of the playback at the same density."""
     rng = np.random.default_rng(BG_SEED)
     (x0, x1), _, (z0, z1) = global_bounds
-    span = BG_DRIFT * t_end
-    zlo = z0 - 0.4 - max(0.0, span)
-    zhi = z1 + 0.4 + max(0.0, -span)
-    n = int(BG_DOTS * (zhi - zlo) / (z1 - z0 + 0.8))
-    pts = np.column_stack([rng.uniform(x0 - 0.4, x1 + 0.4, n),
-                           rng.uniform(-0.7, 1.4, n),
-                           rng.uniform(zlo, zhi, n)])
-    size = rng.uniform(1.5, 11.0, n)
-    alpha = BG_ALPHA * rng.uniform(0.25, 1.0, n) \
-        * (0.4 + 0.6 * (1.4 - pts[:, 1]) / 2.1)     # nearer = brighter
-    front = pts[:, 1] < 0.0        # clearly before the bubble slab
-    batch = lambda sel: (pts[sel], size[sel], alpha[sel])
-    return batch(~front), batch(front)
+    bg = {'x': (x0 - 0.4, x1 + 0.4)}
+    if GRID_STRIDE > 0:
+        step = GRID_STRIDE * GRID_DX
+        zlo = z0 - 0.4 - max(0.0, BG_DRIFT * t_end)
+        zhi = z1 + 0.4 + max(0.0, -BG_DRIFT * t_end)
+        # lines sit on mesh planes: z = k*dx with k a multiple of the stride
+        kk = np.arange(math.ceil(zlo / step), math.floor(zhi / step) + 1)
+        bg['grid_z'] = kk * step
+        # the box is z-periodic: label k modulo the domain height
+        nk = max(1, round(DOM[2] / GRID_DX))
+        bg['grid_k'] = (kk * GRID_STRIDE) % nk
+        bg['grid_x'] = np.arange(math.ceil(bg['x'][0] / step),
+                                 math.floor(bg['x'][1] / step) + 1) * step
+    layers = []
+    for n, ylo, yhi, smin, smax, a, frac, wob in BUBBLE_LAYERS:
+        w = BG_DRIFT * frac
+        zlo = z0 - 0.4 - max(0.0, w * t_end)
+        zhi = z1 + 0.4 + max(0.0, -w * t_end)
+        m = int(n * (zhi - zlo) / (z1 - z0 + 0.8))
+        layers.append({
+            'pts': np.column_stack([rng.uniform(*bg['x'], m),
+                                    rng.uniform(ylo, yhi, m),
+                                    rng.uniform(zlo, zhi, m)]),
+            'size': rng.uniform(smin, smax, m),
+            'alpha': a * rng.uniform(0.4, 1.0, m),
+            'w': w,
+            'wobble': wob,
+            'period': rng.uniform(0.6, 1.3, m),
+            'phase': rng.uniform(0, 2 * np.pi, m),
+            'front': ylo < 0,
+        })
+    bg['layers'] = layers
+    return bg
 
 
-def drift_dust(dust, t):
-    """The field as seen at forward time t: shifted by the drift."""
-    dz = np.array([0.0, 0.0, BG_DRIFT * t])
-    return tuple((pts + dz, size, alpha) for pts, size, alpha in dust)
+def draw_grid(ax, bg, t, bounds):
+    if 'grid_z' not in bg:
+        return
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection
+    (x0, x1), _, (zb0, zb1) = bounds
+    z = bg['grid_z'] + BG_DRIFT * t
+    keep = (z > zb0) & (z < zb1)
+    segs = [[(x0, GRID_Y, zz), (x1, GRID_Y, zz)] for zz in z[keep]]
+    # vertical i-lines are static (they are vertical) and fainter
+    segs_v = [[(xx, GRID_Y, zb0), (xx, GRID_Y, zb1)] for xx in bg['grid_x']
+              if x0 < xx < x1]
+    ax.add_collection3d(Line3DCollection(
+        segs_v, colors=(*BG_RGB, GRID_ALPHA * 0.45), linewidths=0.7))
+    ax.add_collection3d(Line3DCollection(
+        segs, colors=(*BG_RGB, GRID_ALPHA), linewidths=0.9))
+    if GRID_LABELS:
+        for zz, k in zip(z[keep][::2], bg['grid_k'][keep][::2]):
+            ax.text(x1 - 0.02, GRID_Y, zz + 0.01, f'k={k}',
+                    color=BG_RGB, alpha=GRID_ALPHA * 1.6, fontsize=6,
+                    ha='right', va='bottom', zdir='x')
 
 
-def draw_dust(ax, batch):
-    pts, size, alpha = batch
-    cols = np.column_stack([np.tile(BG_RGB, (len(pts), 1)), alpha])
-    ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], s=size, c=cols,
-               marker='.', linewidths=0, depthshade=False)
+def draw_layer(ax, lay, t):
+    x = lay['pts'][:, 0] + lay['wobble'] * np.sin(
+        2 * np.pi * t / lay['period'] + lay['phase'])
+    z = lay['pts'][:, 2] + lay['w'] * t
+    face = np.column_stack([np.tile(BG_RGB, (len(x), 1)),
+                            lay['alpha'] * 0.25])
+    edge = np.column_stack([np.tile(BG_RGB, (len(x), 1)), lay['alpha']])
+    ax.scatter(x, lay['pts'][:, 1], z, s=lay['size'], facecolors=face,
+               edgecolors=edge, marker='o', linewidths=0.7,
+               depthshade=False)
 
 
 def render_frame(nodes, tris, compo, colors, out, bounds, azim=None,
-                 trails=(), streams=(), stream_fade=1.0, dust=None):
+                 trails=(), streams=(), stream_fade=1.0, bg=None, t=0.0):
     azim = CAM_AZIM if azim is None else azim
     fig = plt.figure(figsize=(12.8, 6.4), facecolor=BG)
     ax = fig.add_subplot(projection='3d', facecolor=BG)
-    if dust is not None:
-        draw_dust(ax, dust[0])          # the world behind the bubbles
+    if bg is not None:                   # the world behind the bubbles
+        draw_grid(ax, bg, t, bounds)
+        for lay in bg['layers']:
+            if not lay['front']:
+                draw_layer(ax, lay, t)
     # lines first: added before the surfaces, they always draw under them
     from mpl_toolkits.mplot3d.art3d import Line3DCollection
     for pts, aprof in streams:
@@ -338,8 +398,10 @@ def render_frame(nodes, tris, compo, colors, out, bounds, azim=None,
     pc = Poly3DCollection(v[order], facecolors=face[order],
                           edgecolors='none', antialiased=False)
     ax.add_collection3d(pc)
-    if dust is not None:
-        draw_dust(ax, dust[1])          # the few dots in front of everything
+    if bg is not None:                  # the few bubbles in front of it all
+        for lay in bg['layers']:
+            if lay['front']:
+                draw_layer(ax, lay, t)
     (x0, x1), (y0, y1), (z0, z1) = bounds
     ax.set_xlim(x0, x1)
     ax.set_ylim(y0 - 1.0, y1 + 1.0)   # widen y so perspective stays gentle
@@ -399,7 +461,7 @@ def main():
                         for c, h in zip(centres_c, half)]
     frames = []
     t_end = shown[-1][0]
-    dust = make_dust(bounds, t_end=t_end) if BG_DOTS > 0 else None
+    bg = make_background(bounds, t_end=t_end)
     (bx0, bx1), _, (bz0, bz1) = bounds
     for idx, (t, nodes, tris, compo, pieces, mi) in enumerate(shown):
         fade = min(1.0, t / TRAIL_FADE_T) if TRAIL_FADE_T > 0 else 1.0
@@ -432,8 +494,7 @@ def main():
         render_frame(nodes, tris, compo, colors, out,
                      frame_bounds[idx] if CAM_FOLLOW else bounds,
                      azim=azim, trails=trails, streams=streams,
-                     stream_fade=fade,
-                     dust=drift_dust(dust, t) if dust else None)
+                     stream_fade=fade, bg=bg, t=t)
         frames.append(out)
         print(f'{out}  t={t:.3f}  azim={azim:.1f}  tris={len(tris)}')
     if len(frames) < 2:
