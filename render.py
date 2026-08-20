@@ -1,0 +1,453 @@
+"""Render the logo-animation frames from the LATA dumps and build the GIF.
+
+Forward simulation: letters -> dispersed bubbles. The GIF is assembled in
+reverse (bubbles -> logo), with a hold on the final logo frame.
+
+Usage: python3 render.py [case_name] [t_max] (default: logo, all dumps)
+"""
+import os
+import sys
+import numpy as np
+from PIL import Image
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+import lata
+from make_letters import glyph_colors
+
+# the periodic box; overwritten in main() from the case's own LATA domain
+DOM = (2.56, 0.64, 1.28)
+
+LIGHT = np.array([-0.3, -0.8, 0.5])
+BG = '#0d1b2a'          # deep blue background, water-ish
+
+# -------------------------------------------------------------- output knobs
+RENDER_DPI = 150        # 150 -> 1920x960 frame PNGs
+GIF_SIZE = (960, 480)   # the GIF is downscaled; the MP4 keeps full size
+MP4_CRF = 17            # x264 quality (lower = better)
+
+# ------------------------------------------------------------ camera knobs
+CAM_ELEV = 12           # degrees above the horizon
+CAM_AZIM = -76          # -90 = face-on; toward -75 brings the nabla side
+#                         closer and pushes the T away (yaw about z)
+CAM_FOCAL = 0.5         # matplotlib focal_length: smaller = more perspective
+CAM_AZIM_SWEEP = 6      # degrees of slow yaw over the movie: the reversed
+#                         playback starts at CAM_AZIM + sweep (bubble cloud)
+#                         and settles on CAM_AZIM as the logo locks in. 0 = off
+START_DUMP = 1          # 0 = include the initial condition (crisp CAD look);
+#                         1 = start at the first simulated dump
+FRAME_MS = 70           # GIF frame duration
+
+# ------------------------------------------------------ camera-follow knobs
+# The camera tracks the bubble cloud: each frame is centred on the (smoothed)
+# cloud bounding box and zoomed to it, so the frame never holds dead space.
+# In the reversed playback the camera glides up with the rising swarm and
+# pulls back as the logo assembles. CAM_FOLLOW = 0 restores the fixed frame.
+CAM_FOLLOW = 1
+CAM_SMOOTH = 15         # smoothing window (frames) of the camera path
+CAM_MARGIN = 0.22       # relative margin around the cloud bounding box
+
+# -------------------------------------------------------- background knobs
+# A world-fixed field of faint suspended particles ("marine snow"): the only
+# static reference in the shot, it is what makes the camera glide and zoom
+# visible. Dots clearly in front of the bubble slab draw over the surfaces,
+# the rest behind them. BG_DOTS = 0 disables.
+BG_DOTS = 900
+BG_SEED = 7
+BG_ALPHA = 0.85         # brightest dot; each dot gets a random fraction
+BG_RGB = (0.62, 0.72, 0.85)
+
+# ------------------------------------------------------------- trail knobs
+# Each bubble drags a fading streak along its own trajectory (the tracked
+# centroid path): in the reversed playback it hangs below the rising bubble
+# and vanishes as the logo locks in. TRAIL_T = 0 disables.
+TRAIL_T = 0.0           # seconds of trajectory shown behind each bubble
+TRAIL_ALPHA = 0.35      # opacity where the streak leaves the bubble
+TRAIL_LW = 2.2          # line width
+TRAIL_FADE_T = 0.5      # trails and streamlines melt away over the last
+#                         seconds of assembly, so the locked-in logo is clean
+
+# -------------------------------------------------------- streamline knobs
+# A curtain of instantaneous streamlines of the simulated liquid velocity,
+# seeded on a fixed comb along the bottom of the frame and integrated
+# upward until each line comes within STREAM_CLEAR of a bubble surface: the
+# flow fills the bubble-free space without ever touching the bubbles. Needs
+# `VELOCITY elem` among the deck's post-processed fields. STREAM_COLS = 0
+# disables.
+STREAM_COLS = 0         # seed columns across the frame bottom
+STREAM_LEN = 1.5        # maximum arc length of one line, in m
+STREAM_STEP = 0.012     # integration step, in m
+STREAM_CLEAR = 0.10     # lines stop this far from the nearest bubble surface
+STREAM_ALPHA = 0.28
+STREAM_LW = 1.3
+STREAM_RGB = (0.55, 0.70, 0.85)   # faint water-blue, distinct from bubbles
+
+
+def unwrap_component(x, centre, period):
+    """Wrap coordinates to within half a period of `centre`."""
+    return (x - centre + period / 2) % period + centre - period / 2
+
+
+def circular_centre(x, period):
+    ang = x * (2 * np.pi / period)
+    return np.arctan2(np.sin(ang).mean(), np.cos(ang).mean()) \
+        * period / (2 * np.pi)
+
+
+class VelocityField:
+    """Periodic trilinear sampler of one dump's cell-centred VELOCITY."""
+
+    def __init__(self, master, index):
+        axes = master.node_coordinates()
+        self.origin = np.array([a[0] for a in axes])
+        self.n = np.array([len(a) - 1 for a in axes])        # (ni, nj, nk)
+        self.d = np.array([(a[-1] - a[0]) / (len(a) - 1) for a in axes])
+        # `VELOCITY elem` is dumped as three ELEM scalars; C ordering of the
+        # dump: k outer, then j, then i (verified against the logo geometry)
+        comps = [master.field(f'CELL_VELOCITY_{a}', index) for a in 'XYZ']
+        self.v = np.stack([c.reshape(self.n[2], self.n[1], self.n[0])
+                           for c in comps], axis=-1)
+        # subtract the volume-mean drift (the periodic box free-falls as a
+        # whole): the streamlines show the flow in the falling frame, where
+        # the wakes and the swirl live, not the uniform fall
+        self.v -= self.v.mean(axis=(0, 1, 2))
+
+    def sample(self, pts):
+        """Velocity at pts [M,3] (any unwrapped coordinates)."""
+        u = (pts - self.origin) / self.d - 0.5     # cell-centre units
+        i0 = np.floor(u).astype(int)
+        f = u - i0
+        out = np.zeros_like(pts)
+        for di in (0, 1):
+            wx = f[:, 0] if di else 1 - f[:, 0]
+            ii = (i0[:, 0] + di) % self.n[0]
+            for dj in (0, 1):
+                wy = f[:, 1] if dj else 1 - f[:, 1]
+                jj = (i0[:, 1] + dj) % self.n[1]
+                for dk in (0, 1):
+                    wz = f[:, 2] if dk else 1 - f[:, 2]
+                    kk = (i0[:, 2] + dk) % self.n[2]
+                    out += (wx * wy * wz)[:, None] * self.v[kk, jj, ii, :]
+        return out
+
+
+def integrate_streamlines(vf, seeds, pieces):
+    """Arc-length RK2 streamlines rising from each seed until they run out
+    of length or come within STREAM_CLEAR of a bubble surface. Returns one
+    polyline per surviving seed, with its per-point alpha profile."""
+    n_steps = int(STREAM_LEN / STREAM_STEP)
+    centres = np.array([c for c, r, _ in pieces])
+    radii = np.array([r for c, r, _ in pieces])
+
+    def clear_of_bubbles(p):
+        d = np.linalg.norm(p[:, None, :] - centres[None, :, :], axis=2)
+        return (d - radii[None, :]).min(axis=1) > STREAM_CLEAR
+
+    p = seeds.copy()
+    # each line rises: pick the integration direction with upward velocity
+    sign = np.where(vf.sample(p)[:, 2] >= 0, 1.0, -1.0)[:, None]
+    alive = clear_of_bubbles(p)
+    steps_alive = np.zeros(len(seeds), dtype=int)
+    path = [p.copy()]
+    for _ in range(n_steps):
+        v1 = vf.sample(p)
+        s1 = np.linalg.norm(v1, axis=1, keepdims=True)
+        # a feeble relative flow gives direction noise, not a streamline
+        alive &= s1[:, 0] > 5e-3
+        v1 = np.where(s1 > 1e-12, v1 / np.maximum(s1, 1e-12), 0)
+        mid = p + sign * 0.5 * STREAM_STEP * v1
+        v2 = vf.sample(mid)
+        s2 = np.linalg.norm(v2, axis=1, keepdims=True)
+        v2 = np.where(s2 > 1e-12, v2 / np.maximum(s2, 1e-12), 0)
+        p = p + np.where(alive[:, None], sign * STREAM_STEP * v2, 0)
+        alive &= clear_of_bubbles(p)
+        steps_alive += alive
+        path.append(p.copy())
+    path = np.array(path)                      # [n_steps+1, M, 3]
+    kern = np.ones(5) / 5
+    lines = []
+    for m in range(len(seeds)):
+        n = steps_alive[m] + 1
+        if n < 8:
+            continue
+        pts = path[:n, m]
+        pts = np.column_stack([np.convolve(pts[:, ax], kern, mode='valid')
+                               for ax in range(3)])
+        # soft birth at the bottom, soft death where the line stops
+        ramp = np.linspace(0, 1, len(pts))
+        alpha = np.minimum(np.minimum(ramp / 0.18, 1.0),
+                           np.minimum((1.0 - ramp) / 0.30, 1.0))
+        lines.append((pts, alpha))
+    return lines
+
+
+class Tracker:
+    """Keep bubble identity across frames: the solver renumbers connected
+    components (and breakup creates new ones), so each frame's components are
+    matched to the previous frame by centroid distance and inherit the color
+    of their closest ancestor.
+
+    Unwrapping is done per mesh-connected piece, never per component id: a
+    piece is always far smaller than half a domain period, so wrapping its
+    nodes around its own circular centroid can never tear a triangle apart —
+    which per-component wrapping did whenever a fragment sat exactly on the
+    fold. Each piece is then translated by whole periods to sit next to its
+    component's tracked position, keeping trajectories continuous across
+    periodic boundaries."""
+
+    def __init__(self):
+        self.prev = []          # list of (centroid[3] unwrapped, color index)
+
+    def process(self, nodes, tris, compo_of_tri):
+        """Returns (unwrapped nodes, per-triangle color index, pieces),
+        pieces being a list of (centroid, bounding radius, color index).
+        Every piece is matched to its own previous-frame position over the
+        periodic images, so no piece can ever jump a period between frames."""
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+        dom = np.array(DOM)
+        n = len(nodes)
+        edges = np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]],
+                                tris[:, [2, 0]]])
+        adj = coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])),
+                         shape=(n, n))
+        _, piece_of_node = connected_components(adj, directed=False)
+        comp_of_node = np.zeros(n, dtype=int)
+        comp_of_node[tris.ravel()] = np.repeat(compo_of_tri.astype(int), 3)
+
+        out = nodes.copy()
+        tri_piece = piece_of_node[tris[:, 0]]
+        tri_color = np.zeros(len(tris), dtype=int)
+        entries, pieces = [], []
+        for p in np.unique(piece_of_node[tris.ravel()]):
+            sel = piece_of_node == p
+            # wrap the piece contiguously around its own circular centroid
+            # (a piece is always far smaller than half a period)
+            centre = np.array([circular_centre(out[sel, ax], DOM[ax]) % dom[ax]
+                               for ax in range(3)])
+            for ax in range(3):
+                out[sel, ax] = unwrap_component(out[sel, ax], centre[ax],
+                                                DOM[ax])
+            cen = out[sel].mean(axis=0)
+            if self.prev:
+                # this piece's own nearest ancestor over periodic images:
+                # a newborn fragment lands on its parent
+                best = (np.inf, None, None)
+                for pc, pcol in self.prev:
+                    img = cen - np.round((cen - pc) / dom) * dom
+                    d = np.linalg.norm(img - pc)
+                    if d < best[0]:
+                        best = (d, img, pcol)
+                out[sel] += best[1] - cen
+                cen, col = best[1], best[2]
+            else:
+                col = int(comp_of_node[sel][0])
+            radius = np.linalg.norm(out[sel] - cen, axis=1).max()
+            entries.append((cen, col))
+            pieces.append((cen, radius, col))
+            tri_color[tri_piece == p] = col
+        self.prev = entries
+        return out, tri_color, pieces
+
+
+def make_dust(global_bounds):
+    """The world-fixed particle field, split into behind/in-front batches."""
+    rng = np.random.default_rng(BG_SEED)
+    (x0, x1), _, (z0, z1) = global_bounds
+    pts = np.column_stack([rng.uniform(x0 - 0.4, x1 + 0.4, BG_DOTS),
+                           rng.uniform(-0.7, 1.4, BG_DOTS),
+                           rng.uniform(z0 - 0.4, z1 + 0.4, BG_DOTS)])
+    size = rng.uniform(1.5, 11.0, BG_DOTS)
+    alpha = BG_ALPHA * rng.uniform(0.25, 1.0, BG_DOTS) \
+        * (0.4 + 0.6 * (1.4 - pts[:, 1]) / 2.1)     # nearer = brighter
+    front = pts[:, 1] < 0.0        # clearly before the bubble slab
+    batch = lambda sel: (pts[sel], size[sel], alpha[sel])
+    return batch(~front), batch(front)
+
+
+def draw_dust(ax, batch):
+    pts, size, alpha = batch
+    cols = np.column_stack([np.tile(BG_RGB, (len(pts), 1)), alpha])
+    ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], s=size, c=cols,
+               marker='.', linewidths=0, depthshade=False)
+
+
+def render_frame(nodes, tris, compo, colors, out, bounds, azim=None,
+                 trails=(), streams=(), stream_fade=1.0, dust=None):
+    azim = CAM_AZIM if azim is None else azim
+    fig = plt.figure(figsize=(12.8, 6.4), facecolor=BG)
+    ax = fig.add_subplot(projection='3d', facecolor=BG)
+    if dust is not None:
+        draw_dust(ax, dust[0])          # the world behind the bubbles
+    # lines first: added before the surfaces, they always draw under them
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection
+    for pts, aprof in streams:
+        if len(pts) < 3:
+            continue
+        segs = np.stack([pts[:-1], pts[1:]], axis=1)
+        alpha = STREAM_ALPHA * stream_fade * aprof[:len(segs)]
+        cols = np.column_stack([np.tile(STREAM_RGB, (len(segs), 1)), alpha])
+        ax.add_collection3d(Line3DCollection(segs, colors=cols,
+                                             linewidths=STREAM_LW,
+                                             capstyle='round'))
+    for pts, rgb, a0 in trails:
+        if len(pts) < 3:
+            continue
+        # smooth the centroid wobble (and fragment-shift kinks) away
+        k = min(7, 2 * (len(pts) // 2) - 1)
+        kern = np.ones(k) / k
+        sm = np.column_stack([np.convolve(pts[:, ax_], kern, mode='valid')
+                              for ax_ in range(3)])
+        sm[0] = pts[0]                      # keep the bubble-end anchored
+        segs = np.stack([sm[:-1], sm[1:]], axis=1)
+        fade = np.linspace(a0, 0.0, len(segs)) ** 1.5
+        cols = np.column_stack([np.tile(rgb, (len(segs), 1)), fade])
+        ax.add_collection3d(Line3DCollection(
+            segs, colors=cols, capstyle='round',
+            linewidths=np.linspace(TRAIL_LW, 0.5, len(segs))))
+    v = nodes[tris]
+    n = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
+    n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-30
+    lightdir = LIGHT / np.linalg.norm(LIGHT)
+    shade = 0.55 + 0.45 * np.clip(n @ lightdir, 0, 1)
+    face = colors[compo.astype(int) % len(colors)] * shade[:, None]
+    # painter's ordering: draw far triangles first, along the camera axis
+    el, az = np.deg2rad(CAM_ELEV), np.deg2rad(azim)
+    campos = np.array([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az),
+                       np.sin(el)])
+    order = np.argsort(v.mean(axis=1) @ campos)
+    pc = Poly3DCollection(v[order], facecolors=face[order],
+                          edgecolors='none', antialiased=False)
+    ax.add_collection3d(pc)
+    if dust is not None:
+        draw_dust(ax, dust[1])          # the few dots in front of everything
+    (x0, x1), (y0, y1), (z0, z1) = bounds
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0 - 1.0, y1 + 1.0)   # widen y so perspective stays gentle
+    ax.set_zlim(z0, z1)
+    ax.set_box_aspect((x1 - x0, y1 - y0 + 2.0, z1 - z0))
+    ax.set_proj_type('persp', focal_length=CAM_FOCAL)
+    ax.view_init(elev=CAM_ELEV, azim=azim)
+    ax.set_axis_off()
+    fig.subplots_adjust(left=0, right=1, bottom=-0.35, top=1.35)
+    fig.savefig(out, dpi=RENDER_DPI, facecolor=BG)
+    plt.close(fig)
+
+
+def main():
+    global DOM
+    case = sys.argv[1] if len(sys.argv) > 1 else 'logo'
+    t_max = float(sys.argv[2]) if len(sys.argv) > 2 else np.inf
+    m = lata.Master('.', case)
+    DOM = tuple(m.domain_size())
+    print('domain from lata:', [round(d, 3) for d in DOM])
+    colors = glyph_colors()
+    tracker = Tracker()
+    dumps = []      # every dump: trails need centroids beyond t_max too
+    seen = 0
+    for i in range(len(m.times)):
+        if not m.has('SOMMETS', i, 'INTERFACES'):
+            continue
+        seen += 1
+        if seen <= START_DUMP:
+            continue
+        nodes, tris = m.mesh(i)
+        compo = m.field('COMPO_CONNEXE', i, 'INTERFACES')
+        nodes, color_idx, pieces = tracker.process(nodes, tris, compo)
+        dumps.append((m.times[i], nodes, tris, color_idx, pieces, i))
+    shown = [d for d in dumps if d[0] <= t_max]
+    lo = np.min([d[1].min(axis=0) for d in shown], axis=0) - 0.05
+    hi = np.max([d[1].max(axis=0) for d in shown], axis=0) + 0.05
+    bounds = list(zip(lo, hi))
+    print('bounds:', [(round(a, 2), round(b, 2)) for a, b in bounds])
+    if CAM_FOLLOW:
+        los = np.array([d[1].min(axis=0) for d in shown])
+        his = np.array([d[1].max(axis=0) for d in shown])
+        centres_c = (los + his) / 2
+        sizes_c = his - los
+        k = min(CAM_SMOOTH, len(shown)) | 1          # odd window
+        kern = np.ones(k) / k
+        pad = k // 2
+        smooth = lambda a: np.column_stack(
+            [np.convolve(np.pad(a[:, ax], pad, mode='edge'), kern,
+                         mode='valid') for ax in range(3)])
+        centres_c, sizes_c = smooth(centres_c), smooth(sizes_c)
+        half = (1 + CAM_MARGIN) * sizes_c / 2
+        # keep the output's 2:1 frame: widen whichever of x/z is short
+        half[:, 0] = np.maximum(half[:, 0], 2 * half[:, 2])
+        half[:, 2] = np.maximum(half[:, 2], half[:, 0] / 2)
+        frame_bounds = [list(zip(c - h, c + h))
+                        for c, h in zip(centres_c, half)]
+    frames = []
+    t_end = shown[-1][0]
+    dust = make_dust(bounds) if BG_DOTS > 0 else None
+    (bx0, bx1), _, (bz0, bz1) = bounds
+    for idx, (t, nodes, tris, compo, pieces, mi) in enumerate(shown):
+        fade = min(1.0, t / TRAIL_FADE_T) if TRAIL_FADE_T > 0 else 1.0
+        # the trail of a bubble is where it goes next in forward time —
+        # i.e. the path it just rose along in the reversed playback.
+        # (piece indexing across dumps is approximate; trails are off by
+        # default, superseded by the streamline curtain)
+        trails = []
+        if TRAIL_T > 0 and fade > 0.02:
+            future = [d[4] for d in dumps[idx:]
+                      if d[0] <= t + TRAIL_T]
+            for e in range(len(pieces)):
+                pts = np.array([f[e][0] for f in future if e < len(f)])
+                trails.append((pts, colors[pieces[e][2]],
+                               TRAIL_ALPHA * fade))
+        # the streamline curtain: fixed seeds along the frame bottom, rising
+        # through the falling-frame flow until just under the bubbles
+        streams = []
+        if (STREAM_COLS > 0 and fade > 0.02
+                and m.has('CELL_VELOCITY_X', mi)):
+            vf = VelocityField(m, mi)
+            xs = np.linspace(bx0 + 0.06, bx1 - 0.06, STREAM_COLS)
+            # deterministic golden-ratio stagger in depth
+            ys = 0.32 + 0.55 * ((np.arange(STREAM_COLS) * 0.618) % 1.0 - 0.5)
+            seeds = np.column_stack([xs, ys, np.full(STREAM_COLS, bz0 + 0.03)])
+            streams = integrate_streamlines(vf, seeds, pieces)
+        # forward time t_end -> 0 is playback start -> end: sweep to CAM_AZIM
+        azim = CAM_AZIM + CAM_AZIM_SWEEP * (t / t_end)
+        out = f'frame_{len(frames):03d}.png'
+        render_frame(nodes, tris, compo, colors, out,
+                     frame_bounds[idx] if CAM_FOLLOW else bounds,
+                     azim=azim, trails=trails, streams=streams,
+                     stream_fade=fade, dust=dust)
+        frames.append(out)
+        print(f'{out}  t={t:.3f}  azim={azim:.1f}  tris={len(tris)}')
+    if len(frames) < 2:
+        print('not enough frames for a gif')
+        return
+    # reverse playback: dispersed bubbles assemble into the logo
+    imgs = [Image.open(f).resize(GIF_SIZE, Image.LANCZOS)
+            for f in reversed(frames)]
+    durations = [FRAME_MS] * len(imgs)
+    durations[0] = 600            # short hold on the bubble cloud
+    durations[-1] = 2500          # hold the assembled logo
+    imgs[0].save(f'{case}_reverse.gif', save_all=True, append_images=imgs[1:],
+                 duration=durations, loop=0, optimize=True)
+    print(f'wrote {case}_reverse.gif ({len(imgs)} frames)')
+    # the MP4 keeps the frames' native resolution
+    import shutil
+    import subprocess
+    if shutil.which('ffmpeg'):
+        cwd = os.getcwd()
+        with open('frames_rev.txt', 'w') as f:
+            for fr in reversed(frames):
+                f.write(f"file '{cwd}/{fr}'\nduration {FRAME_MS / 1000}\n")
+            f.write(f"file '{cwd}/{frames[0]}'\nduration 2.5\n")
+        subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'concat',
+                        '-safe', '0', '-i', 'frames_rev.txt',
+                        '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+                        '-crf', str(MP4_CRF), '-r', '25',
+                        f'{case}_reverse.mp4'], check=True)
+        print(f'wrote {case}_reverse.mp4')
+    else:
+        print('ffmpeg not found: no mp4 written')
+
+
+if __name__ == '__main__':
+    main()

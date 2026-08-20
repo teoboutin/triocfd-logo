@@ -1,0 +1,16 @@
+# simulation cases and their outputs (regenerable via pipeline.py)
+runs/
+run[0-9]*/
+test_*/
+
+# generated geometry, previews and movies at the repo root
+init.lata*
+preview*.png
+components.png
+c_mask.png
+frame_*.png
+*.gif
+*.mp4
+*.log
+
+__pycache__/

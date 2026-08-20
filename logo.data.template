@@ -1,0 +1,140 @@
+# TrioCFD logo animation: each glyph is a bubble (see make_letters.py). #
+# Bubbles rise, wobble and round off under surface tension; the movie is #
+# played backwards so the logo assembles itself out of bubbles. #
+dimension 3
+Probleme_FTD_IJK pb
+
+Domaine_IJK DOM
+Lire DOM
+{
+  nbelem @NBI@ @NBJ@ @NBK@
+  size_dom @LX@ @LY@ @LZ@
+  perio 1 1 1
+  nproc @NPI@ @NPJ@ @NPK@
+}
+
+Schema_RK3_IJK sch
+lire sch
+{
+  tinit 0.0
+  timestep 0.02
+  timestep_facsec 1.0
+  nb_pas_dt_max @STEPS@
+  dt_sauvegarde 5000
+  cfl 1.0
+  fo  1.0
+  oh  1.0
+}
+
+IJK dis
+
+associer sch pb
+associer DOM pb
+Discretize pb dis
+
+Option_IJK { check_divergence }
+
+lire pb
+{
+  SOLVED_EQUATIONS
+  {
+    Navier_Stokes_FTD_IJK hydraulique
+    ijk_interfaces interf
+  }
+
+  Fluide_Diphasique_IJK
+  {
+    # phase 0: gas, inside the letters #
+    fluide0 Fluide_Incompressible
+    {
+        mu  Champ_Uniforme 1 5e-3
+        rho Champ_Uniforme 1 100.
+    }
+    # phase 1: liquid #
+    fluide1 Fluide_Incompressible
+    {
+        mu  Champ_Uniforme 1 5e-2
+        rho Champ_Uniforme 1 1000.
+    }
+    sigma   Champ_Uniforme 1 1.0
+    gravite Champ_Uniforme 3 0. 0. -0.4
+  }
+
+  hydraulique
+  {
+    velocity_convection_op Centre
+    Boundary_Conditions
+    {
+      bctype_kmin perio
+      bctype_kmax perio
+    }
+
+    multigrid_solver
+    {
+      solver_precision mixed
+      coarsen_operators 2
+      Coarsen_Operator_Uniform {  }
+      Coarsen_Operator_Uniform {  }
+      ghost_size 1
+      pre_smooth_steps 1 7
+      smooth_steps 1 7
+      relax_jacobi 1 0.7
+      solveur_grossier GCP { seuil 1e-9  precond ssor { omega 1.5 } }
+      seuil 1e-7
+      nb_full_mg_steps 2 4 1
+    }
+
+    # gentle dispersal: push the outer letters outwards (x), stagger #
+    # the out-of-plane drift (y) and the vertical kick (z) per letter #
+    expression_vx_init -0.28*sin(2*3.14159265*x/@LX@)+0.45*(y-@YMID@)
+    expression_vy_init -0.45*(x-@XAXIS@)
+    expression_vz_init 0.22*cos(2*3.14159265*2*x/@LX@)
+  }
+
+  interf
+  {
+    terme_gravite rho_g
+    fichier_reprise_interface init.lata
+    timestep_reprise_interface 1
+    lata_meshname   INTERFACES
+    portee_force_repulsion 0.04
+    delta_p_max_repulsion 10.
+    remaillage_ft_ijk
+    {
+      pas_remaillage 1e-6
+      nb_iter_barycentrage 1
+      relax_barycentrage 1.
+      critere_arete 0.35
+      seuil_dvolume_residuel 0.
+      nb_iter_correction_volume 6
+      nb_iter_remaillage 6
+      facteur_longueur_ideale 0.5
+      lissage_courbure_coeff -0.025
+      lissage_courbure_iterations_systematique 1
+      lissage_courbure_iterations_si_remaillage 3
+    }
+  }
+
+  {
+    nom_sauvegarde logo.sauv
+  }
+
+  post_processing
+  {
+    format lata
+    nb_pas_dt_post @DTPOST@
+
+    fields
+    {
+       indicatrice elem
+       VELOCITY elem
+    }
+
+    interfaces interf
+    {
+       courbure som
+    }
+  }
+}
+solve pb
+Fin
