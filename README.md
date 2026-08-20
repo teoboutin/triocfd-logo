@@ -43,6 +43,15 @@ case (no TrioCFD environment needed).
 - `--nproc NI NJ NK`: MPI decomposition; each direction's cell count must be
   divisible by 4*nproc (two multigrid coarsenings per rank) — the driver
   checks.
+- `--gravity G` (default 0.4) and `--free-fall`: the gravity mode. By
+  default gravity points UP and the mean rho*g is compensated
+  (`compute_force_init`), so the liquid stays still and the bubbles sink
+  with true buoyant dynamics — large ones faster, real wakes; reversed,
+  they rise from below, size-sorted. At g = 0.4 the big bubbles sit at
+  Bond ~ 10 and shatter into a fizz; g = 0.2 keeps them as wobbly
+  ellipsoids. `--free-fall` restores the historical look: downward gravity,
+  no compensation, the whole periodic box falls as one and the bubbles
+  only relax and drift (no relative buoyancy).
 - Render quality: `RENDER_DPI` (150 = 1920x960 frames), `GIF_SIZE`,
   `MP4_CRF` at the top of `render.py`, next to the camera knobs
   (`CAM_ELEV/AZIM/FOCAL`, azimuth sweep, follow) and the background field
@@ -79,11 +88,13 @@ case (no TrioCFD environment needed).
 ## Physics notes (the non-obvious ones)
 
 - In a fully periodic box, a uniform gravity cannot be balanced by the
-  periodic pressure: the whole mixture free-falls, and there is no relative
-  buoyancy in the falling frame. That free fall IS the animation — reversed,
-  everything rises together. (`compute_force_init` would cancel it and give
-  true buoyant rise instead; tried, and the wake capture made bubbles
-  collide.)
+  periodic pressure: without compensation the whole mixture free-falls, and
+  there is no relative buoyancy in the falling frame (`--free-fall`). The
+  default mode compensates the mean rho*g and flips gravity upward, which
+  keeps both the physics (buoyant, size-sorted motion, wakes) and the
+  reversed-playback direction (bubbles rise into the logo). Wake capture is
+  real in this mode — a trailing bubble accelerates into a leader — which
+  is what the inter-bubble repulsion settings hold in check.
 - The renderer's streamline option must subtract the volume-mean velocity
   for the same reason, or it draws the fall instead of the flow.
 - A rigid rotation preserves mutual distances: the swirl gives the carousel

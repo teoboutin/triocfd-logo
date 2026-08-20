@@ -58,7 +58,19 @@ def generate(args, out):
         if n % (4 * np_):
             fail(f'nbelem_{ax} = {n} must be divisible by 4*nproc_{ax} '
                  f'= {4 * np_} (two multigrid coarsenings per rank)')
+    # Gravity mode. Default: gravity points UP and the mean rho*g is
+    # compensated (compute_force_init), so the liquid stays still and the
+    # bubbles sink buoyantly, large ones faster — reversed, they rise from
+    # below with true size-sorted buoyant dynamics. --free-fall instead
+    # points gravity down with no compensation: the whole periodic box
+    # free-falls (no relative buoyancy), the historical look.
+    if args.free_fall:
+        gz, force = -args.gravity, '# free fall: no compensation #'
+    else:
+        gz = +args.gravity
+        force = 'compute_force_init\n    expression_derivee_force 0.'
     subst = {
+        '@GZ@': gz, '@FORCE_INIT@': force,
         '@NBI@': nb[0], '@NBJ@': nb[1], '@NBK@': nb[2],
         '@LX@': dom[0], '@LY@': dom[1], '@LZ@': dom[2],
         '@NPI@': args.nproc[0], '@NPJ@': args.nproc[1],
@@ -125,6 +137,11 @@ def main():
                     metavar=('NI', 'NJ', 'NK'))
     ap.add_argument('--dt-post', type=int, default=5,
                     help='time steps between dumps (default 5)')
+    ap.add_argument('--gravity', type=float, default=0.4,
+                    help='gravity magnitude (default 0.4 m/s2)')
+    ap.add_argument('--free-fall', action='store_true',
+                    help='downward gravity, no mean compensation: the whole '
+                         'box free-falls, no relative buoyancy (old look)')
     ap.add_argument('--render-tmax', type=float, default=None,
                     help='render dumps up to this time only (default: all)')
     ap.add_argument('--exec', dest='executable', default=None,

@@ -57,12 +57,13 @@ lire pb
         rho Champ_Uniforme 1 1000.
     }
     sigma   Champ_Uniforme 1 1.0
-    gravite Champ_Uniforme 3 0. 0. -0.4
+    gravite Champ_Uniforme 3 0. 0. @GZ@
   }
 
   hydraulique
   {
     velocity_convection_op Centre
+    @FORCE_INIT@
     Boundary_Conditions
     {
       bctype_kmin perio
@@ -97,8 +98,8 @@ lire pb
     fichier_reprise_interface init.lata
     timestep_reprise_interface 1
     lata_meshname   INTERFACES
-    portee_force_repulsion 0.04
-    delta_p_max_repulsion 10.
+    portee_force_repulsion 0.08
+    delta_p_max_repulsion 50.
     remaillage_ft_ijk
     {
       pas_remaillage 1e-6
