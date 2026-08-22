@@ -281,12 +281,15 @@ def make_background(global_bounds, t_end=0.0):
     (x0, x1), _, (z0, z1) = global_bounds
     bg = {'x': (x0 - 0.4, x1 + 0.4)}
     if GRID_STRIDE > 0:
+        # the grid is world-fixed: it is the static reference the camera
+        # and the drifting bubble layers move against. Lines span the full
+        # extent ever seen; the canvas clips whatever is off-screen.
         step = GRID_STRIDE * GRID_DX
-        zlo = z0 - 0.4 - max(0.0, BG_DRIFT * t_end)
-        zhi = z1 + 0.4 + max(0.0, -BG_DRIFT * t_end)
+        zlo, zhi = z0 - 0.4, z1 + 0.4
         # lines sit on mesh planes: z = k*dx with k a multiple of the stride
         kk = np.arange(math.ceil(zlo / step), math.floor(zhi / step) + 1)
         bg['grid_z'] = kk * step
+        bg['grid_zext'] = (zlo, zhi)
         # the box is z-periodic: label k modulo the domain height
         nk = max(1, round(DOM[2] / GRID_DX))
         bg['grid_k'] = (kk * GRID_STRIDE) % nk
@@ -314,24 +317,21 @@ def make_background(global_bounds, t_end=0.0):
     return bg
 
 
-def draw_grid(ax, bg, t, bounds):
+def draw_grid(ax, bg):
     if 'grid_z' not in bg:
         return
     from mpl_toolkits.mplot3d.art3d import Line3DCollection
-    (x0, x1), _, (zb0, zb1) = bounds
-    z = bg['grid_z'] + BG_DRIFT * t
-    keep = (z > zb0) & (z < zb1)
-    segs = [[(x0, GRID_Y, zz), (x1, GRID_Y, zz)] for zz in z[keep]]
-    # vertical i-lines are static (they are vertical) and fainter
-    segs_v = [[(xx, GRID_Y, zb0), (xx, GRID_Y, zb1)] for xx in bg['grid_x']
-              if x0 < xx < x1]
+    x0, x1 = bg['x']
+    zlo, zhi = bg['grid_zext']
+    segs = [[(x0, GRID_Y, zz), (x1, GRID_Y, zz)] for zz in bg['grid_z']]
+    segs_v = [[(xx, GRID_Y, zlo), (xx, GRID_Y, zhi)] for xx in bg['grid_x']]
     ax.add_collection3d(Line3DCollection(
         segs_v, colors=(*BG_RGB, GRID_ALPHA * 0.45), linewidths=0.7))
     ax.add_collection3d(Line3DCollection(
         segs, colors=(*BG_RGB, GRID_ALPHA), linewidths=0.9))
     if GRID_LABELS:
-        for zz, k in zip(z[keep][::2], bg['grid_k'][keep][::2]):
-            ax.text(x1 - 0.02, GRID_Y, zz + 0.01, f'k={k}',
+        for zz, k in zip(bg['grid_z'][::2], bg['grid_k'][::2]):
+            ax.text(x1 - 0.45, GRID_Y, zz + 0.01, f'k={k}',
                     color=BG_RGB, alpha=GRID_ALPHA * 1.6, fontsize=6,
                     ha='right', va='bottom', zdir='x')
 
@@ -354,7 +354,7 @@ def render_frame(nodes, tris, compo, colors, out, bounds, azim=None,
     fig = plt.figure(figsize=(12.8, 6.4), facecolor=BG)
     ax = fig.add_subplot(projection='3d', facecolor=BG)
     if bg is not None:                   # the world behind the bubbles
-        draw_grid(ax, bg, t, bounds)
+        draw_grid(ax, bg)
         for lay in bg['layers']:
             if not lay['front']:
                 draw_layer(ax, lay, t)
