@@ -66,25 +66,27 @@ CAM_MARGIN = 0.22       # relative margin around the cloud bounding box
 BG_SEED = 7
 BG_RGB = (0.62, 0.72, 0.85)
 # The grid is the reference frame of the shot; everything ascends against
-# it. ASCEND is the playback ascent speed (m/s) of the logo swarm + camera:
+# it. ASCEND is the playback ascent speed (m/s) of the logo swarm + camera —
 # a uniform lift added to the rendered positions, i.e. the mean upward
-# carriage of the liquid the simulation deliberately does not carry. The
-# micro-bubble layers ascend too, slower than the swarm (they sink relative
-# to the tracking camera, but rise against the grid).
-ASCEND = 0.6
+# carriage of the liquid the simulation deliberately does not carry — and
+# the single global pace knob: the micro-bubble layers move at fixed
+# fractions of it (slower than the swarm: they sink relative to the
+# tracking camera, but rise against the grid).
+ASCEND = 1.0
 GRID_STRIDE = 8         # mesh cells between grid lines (0 disables the grid)
 GRID_DX = 0.02          # the mesh spacing the grid depicts
 GRID_ALPHA = 0.22
 GRID_Y = 1.35           # depth of the grid plane (behind everything)
 GRID_LABELS = True      # a few faint k-indices on the horizontal lines
-# per layer: (count, y0, y1, size_min, size_max, alpha, playback ascend
-# speed in m/s, wobble amplitude in m). Nearer layers are larger and faster
-# (bigger bubbles rise faster); all are slower than the swarm's ~ASCEND.
-# Layers with y < 0 draw over the surfaces (in front of the bubble slab).
+# per layer: (count, y0, y1, size_min, size_max, alpha, ascend speed as a
+# fraction of ASCEND, wobble amplitude in m). Nearer layers are larger and
+# faster (bigger bubbles rise faster); fractions < 1 keep every layer
+# slower than the swarm. Layers with y < 0 draw over the surfaces (in
+# front of the bubble slab).
 BUBBLE_LAYERS = (
-    (260, 1.00, 1.30, 2.0, 8.0, 0.55, 0.18, 0.015),
-    (170, 0.55, 0.95, 4.0, 14.0, 0.65, 0.33, 0.025),
-    (45, -0.50, -0.05, 8.0, 26.0, 0.75, 0.48, 0.035),
+    (260, 1.00, 1.30, 2.0, 8.0, 0.55, 0.30, 0.015),
+    (170, 0.55, 0.95, 4.0, 14.0, 0.65, 0.55, 0.025),
+    (45, -0.50, -0.05, 8.0, 26.0, 0.75, 0.80, 0.035),
 )
 
 # ------------------------------------------------------------- trail knobs
@@ -303,8 +305,8 @@ def make_background(global_bounds, t_end=0.0):
         bg['grid_x'] = np.arange(math.ceil(bg['x'][0] / step),
                                  math.floor(bg['x'][1] / step) + 1) * step
     layers = []
-    for n, ylo, yhi, smin, smax, a, ascend, wob in BUBBLE_LAYERS:
-        w = -ascend            # forward-time drift; playback runs t backwards
+    for n, ylo, yhi, smin, smax, a, frac, wob in BUBBLE_LAYERS:
+        w = -ASCEND * frac     # forward-time drift; playback runs t backwards
         zlo = z0 - 0.4 - max(0.0, w * t_end)
         zhi = z1 + 0.4 + max(0.0, -w * t_end)
         m = int(n * (zhi - zlo) / (z1 - z0 + 0.8))
