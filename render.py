@@ -71,7 +71,7 @@ BG_RGB = (0.62, 0.72, 0.85)
 # carriage of the liquid the simulation deliberately does not carry. The
 # micro-bubble layers ascend too, slower than the swarm (they sink relative
 # to the tracking camera, but rise against the grid).
-ASCEND = 0.4
+ASCEND = 0.6
 GRID_STRIDE = 8         # mesh cells between grid lines (0 disables the grid)
 GRID_DX = 0.02          # the mesh spacing the grid depicts
 GRID_ALPHA = 0.22
@@ -82,9 +82,9 @@ GRID_LABELS = True      # a few faint k-indices on the horizontal lines
 # (bigger bubbles rise faster); all are slower than the swarm's ~ASCEND.
 # Layers with y < 0 draw over the surfaces (in front of the bubble slab).
 BUBBLE_LAYERS = (
-    (260, 1.00, 1.30, 2.0, 8.0, 0.55, 0.12, 0.015),
-    (170, 0.55, 0.95, 4.0, 14.0, 0.65, 0.22, 0.025),
-    (45, -0.50, -0.05, 8.0, 26.0, 0.75, 0.32, 0.035),
+    (260, 1.00, 1.30, 2.0, 8.0, 0.55, 0.18, 0.015),
+    (170, 0.55, 0.95, 4.0, 14.0, 0.65, 0.33, 0.025),
+    (45, -0.50, -0.05, 8.0, 26.0, 0.75, 0.48, 0.035),
 )
 
 # ------------------------------------------------------------- trail knobs
